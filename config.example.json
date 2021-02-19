@@ -1,0 +1,9 @@
+{
+  "Address": "http://localhost:8080",
+  "Port": ":8080",
+  "Length": 6,
+  "DBType": "sqlite3",
+  "DBName": "gopastedb.sqlite",
+  "DBUsername": "",
+  "DBPassword": ""
+}
