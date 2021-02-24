@@ -223,7 +223,11 @@ func GetPaste(paste string) (string, error) {
 		return "", err
 	}
 
-	if time.Now().Format("2006-01-02 15:04:05") >= expiry {
+
+	//log.Print(time.Now().Format("2006-01-02T15:04:05Z"))
+	//log.Print(expiry)
+
+	if time.Now().Format("2006-01-02T15:04:05Z") >= expiry {
 		stmt, err := db.Prepare("DELETE FROM pastebin WHERE id=?")
 		if err != nil {
 			return "", err

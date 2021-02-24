@@ -1,8 +1,9 @@
 # IntelliJ IDE
 .idea
 *.iml
-
+.goreleaser.yml
 # App data
 *.sqlite
 config.json
-
+dist
+.history
