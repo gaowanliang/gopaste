@@ -35,7 +35,7 @@
 
 ### Configuration
 
-在运行pastengo之前，你应该编辑 ```config.json``` 。
+在运行GoPaste之前，你应该编辑 ```config.json``` 。
 ```
 Address : 用于重定向的基本url
 Port : HTTP侦听端口
