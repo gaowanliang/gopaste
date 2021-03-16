@@ -443,7 +443,7 @@ func CheckDB() {
 	}
 }
 
-func main() {
+func imain() {
 	LoadConfiguration()
 	CheckDB()
 
