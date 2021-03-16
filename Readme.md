@@ -56,8 +56,3 @@ GOPaste will automatically create the required SQL tables required.
 2. Give `gopaste` execution permission
 3. Fill it in `config.json`
 4. Run through the daemons or `screen`
-
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details
