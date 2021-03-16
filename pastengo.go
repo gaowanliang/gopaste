@@ -9,7 +9,6 @@ import (
 	"errors"
 	"html"
 	"html/template"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -18,8 +17,6 @@ import (
 
 	duration "github.com/channelmeter/iso8601duration"
 	"github.com/dchest/uniuri"
-	"github.com/gorilla/mux"
-
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -68,8 +65,14 @@ var templates = template.Must(template.ParseFiles(
 // InvalidPasteError save & get paste error structs
 type InvalidPasteError struct{}
 
+// InvalidPasteError save & get URL error structs
+type InvalidURLError struct{}
+
 func (e *InvalidPasteError) Error() string {
 	return "Invalid paste"
+}
+func (e *InvalidURLError) Error() string {
+	return "Invalid URL"
 }
 
 // Page generation struct
@@ -157,7 +160,13 @@ func DurationFromExpiry(expiry string) time.Duration {
 }
 
 // Save pastes to database
-func Save(raw string, expiry string) (*Response, error) {
+func Save(raw string, expiry string, lang string) (*Response, error) {
+	//log.Println(raw)
+	httpFtp, _ := regexp.MatchString(`(http|ftp|https)://([\w_-]+(?:(?:\.[\w_-]+)+))([\w.,@?^=%&:/~+#-]*[\w@?^=%&/~+#-])?`, raw)
+	//log.Println(httpFtp)
+	if lang == "url" && !httpFtp {
+		return nil, &InvalidURLError{}
+	}
 	db := GetDB()
 	defer db.Close()
 
@@ -173,7 +182,7 @@ func Save(raw string, expiry string) (*Response, error) {
 			if err != nil {
 				return nil, err
 			}
-			url := configuration.Address + "/" + id
+			url := "/" + id
 			return &Response{true, id, hash, url, len(paste), delkey}, nil
 		}
 	} else if err != sql.ErrNoRows {
@@ -184,7 +193,7 @@ func Save(raw string, expiry string) (*Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	url := configuration.Address + "/" + id
+	url := "/" + id
 
 	const timeFormat = "2006-01-02 15:04:05"
 	expiryTime := time.Now().Add(DurationFromExpiry(expiry)).Format(timeFormat)
@@ -192,11 +201,11 @@ func Save(raw string, expiry string) (*Response, error) {
 	delKey := uniuri.NewLen(MAX_KEY_LEN)
 	dataEscaped := html.EscapeString(raw)
 
-	stmt, err := db.Prepare("INSERT INTO pastebin(id, hash, data, delkey, expiry) values(?,?,?,?,?)")
+	stmt, err := db.Prepare("INSERT INTO pastebin(id, hash, data, delkey, expiry,language) values(?,?,?,?,?,?)")
 	if err != nil {
 		return nil, err
 	}
-	_, err = stmt.Exec(id, sha, dataEscaped, delKey, expiryTime)
+	_, err = stmt.Exec(id, sha, dataEscaped, delKey, expiryTime, lang)
 	if err != nil {
 		return nil, err
 	}
@@ -205,24 +214,23 @@ func Save(raw string, expiry string) (*Response, error) {
 }
 
 // GetPaste extracts paste from database
-func GetPaste(paste string) (string, error) {
+func GetPaste(paste string) (string, string, error) {
 	pasteId := html.EscapeString(paste)
 	if !ValidPasteId(pasteId) {
-		return "", &InvalidPasteError{}
+		return "", "", &InvalidPasteError{}
 	}
 
 	db := GetDB()
 	defer db.Close()
 
-	var s, expiry string
-	err := db.QueryRow("SELECT data, expiry FROM pastebin WHERE id=?", pasteId).Scan(&s, &expiry)
+	var s, expiry, lang string
+	err := db.QueryRow("SELECT data, expiry,language FROM pastebin WHERE id=?", pasteId).Scan(&s, &expiry, &lang)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", &InvalidPasteError{}
+			return "", "", &InvalidPasteError{}
 		}
-		return "", err
+		return "", "", err
 	}
-
 
 	//log.Print(time.Now().Format("2006-01-02T15:04:05Z"))
 	//log.Print(expiry)
@@ -230,16 +238,16 @@ func GetPaste(paste string) (string, error) {
 	if time.Now().Format("2006-01-02T15:04:05Z") >= expiry {
 		stmt, err := db.Prepare("DELETE FROM pastebin WHERE id=?")
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		_, err = stmt.Exec(pasteId)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		return "", &InvalidPasteError{}
+		return "", "", &InvalidPasteError{}
 	}
 
-	return html.UnescapeString(s), nil
+	return html.UnescapeString(s), lang, nil
 }
 
 // RootHandler handles generating the root page
@@ -250,30 +258,64 @@ func RootHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-// SaveHandler handles saving paste data and redirect to its url
-func SaveHandler(w http.ResponseWriter, r *http.Request) {
-	paste := r.FormValue("p")
-	expiry := r.FormValue("expiry")
-	if paste == "" { // Empty paste, go back
-		http.Redirect(w, r, configuration.Address, http.StatusFound)
-		return
-	}
-
-	b, err := Save(paste, expiry)
+// LoadConfiguration opens and reads config file, then sets up database
+func LoadConfiguration() {
+	file, err := os.Open("config.json")
 	if err != nil {
-		switch err.(type) {
-		case *InvalidPasteError:
-			http.Error(w, err.Error(), http.StatusNotFound)
-		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-		return
+		panic(err)
 	}
 
-	http.Redirect(w, r, b.URL, http.StatusFound)
+	decoder := json.NewDecoder(file)
+	err = decoder.Decode(&configuration)
+	if err != nil {
+		panic(err)
+	}
+
+	if configuration.Length > MAX_ID_LEN {
+		configuration.Length = MAX_ID_LEN
+	}
+
+	if configuration.Length <= 0 {
+		configuration.Length = 1
+	}
+
+	switch configuration.DBType {
+	case "mysql":
+		dbString = configuration.DBUsername + ":" + configuration.DBPassword + "@/" + configuration.DBName + "?charset=utf8"
+		dbType = configuration.DBType
+	case "sqlite3":
+		dbString = "./" + configuration.DBName + "?charset=utf8"
+		dbType = configuration.DBType
+	default:
+		panic("Incorrect DBType configuration")
+	}
+}
+
+// CheckDB verifies DB link and table existence. Creates it if necessary
+func CheckDB() {
+	db := GetDB()
+	defer db.Close()
+
+	_, err := db.Query("SELECT 1 FROM pastebin LIMIT 1")
+	if err != nil {
+		_, err = db.Exec(`
+        CREATE TABLE pastebin (
+            id VARCHAR(30) NOT NULL,
+            hash CHAR(40) DEFAULT NULL,
+            data TEXT,
+            delkey CHAR(40) default NULL,
+            expiry DATETIME,
+            language TEXT,
+            PRIMARY KEY (id)
+        );`)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 }
 
 // RawHandler handles raw paste content display
+/*
 func RawHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	paste := vars["pasteId"]
@@ -388,61 +430,6 @@ func CloneHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// LoadConfiguration opens and reads config file, then sets up database
-func LoadConfiguration() {
-	file, err := os.Open("config.json")
-	if err != nil {
-		panic(err)
-	}
-
-	decoder := json.NewDecoder(file)
-	err = decoder.Decode(&configuration)
-	if err != nil {
-		panic(err)
-	}
-
-	if configuration.Length > MAX_ID_LEN {
-		configuration.Length = MAX_ID_LEN
-	}
-
-	if configuration.Length <= 0 {
-		configuration.Length = 1
-	}
-
-	switch configuration.DBType {
-	case "mysql":
-		dbString = configuration.DBUsername + ":" + configuration.DBPassword + "@/" + configuration.DBName + "?charset=utf8"
-		dbType = configuration.DBType
-	case "sqlite3":
-		dbString = "./" + configuration.DBName + "?charset=utf8"
-		dbType = configuration.DBType
-	default:
-		panic("Incorrect DBType configuration")
-	}
-}
-
-// CheckDB verifies DB link and table existence. Creates it if necessary
-func CheckDB() {
-	db := GetDB()
-	defer db.Close()
-
-	_, err := db.Query("SELECT 1 FROM pastebin LIMIT 1")
-	if err != nil {
-		_, err = db.Exec(`
-        CREATE TABLE pastebin (
-            id VARCHAR(30) NOT NULL,
-            hash CHAR(40) DEFAULT NULL,
-            data TEXT,
-            delkey CHAR(40) default NULL,
-            expiry DATETIME,
-            PRIMARY KEY (id)
-        );`)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-}
-
 func imain() {
 	LoadConfiguration()
 	CheckDB()
@@ -451,13 +438,11 @@ func imain() {
 
 	router.HandleFunc("/{pasteId}/raw", RawHandler).Methods("GET")
 	router.HandleFunc("/{pasteId}/clone", CloneHandler).Methods("GET")
-	router.HandleFunc("/{pasteId}/clone", SaveHandler).Methods("POST")
 	router.HandleFunc("/{pasteId}/download", DownloadHandler).Methods("GET")
 	router.HandleFunc("/{pasteId}", PasteHandler).Methods("GET")
-	router.HandleFunc("/", SaveHandler).Methods("POST")
 	router.HandleFunc("/", RootHandler)
 	err := http.ListenAndServe(configuration.Port, router)
 	if err != nil {
 		log.Fatal(err)
 	}
-}
+}*/
